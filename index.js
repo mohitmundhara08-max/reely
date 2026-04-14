@@ -132,6 +132,9 @@ app.post("/bot", async (req, res) => {
 // ── AI proxy (used by dashboard) ──────────────────────────────────────────────
 app.post("/ai", async (req, res) => {
   const { messages, system } = req.body;
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.status(500).json({ error: "ANTHROPIC_API_KEY not set" });
+  }
   try {
     const r = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -140,11 +143,21 @@ app.post("/ai", async (req, res) => {
         "x-api-key": process.env.ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, system, messages }),
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1000,
+        system,
+        messages,
+      }),
     });
     const data = await r.json();
+    if (data.error) {
+      console.error("Anthropic error:", JSON.stringify(data.error));
+      return res.status(500).json({ error: data.error.message });
+    }
     res.json(data);
   } catch (e) {
+    console.error("AI proxy error:", e.message);
     res.status(500).json({ error: e.message });
   }
 });
