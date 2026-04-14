@@ -28,9 +28,10 @@ const memReels = [];   // fallback when no Supabase
 function phone(from) { return from.replace("whatsapp:", ""); }
 
 async function send(to, body) {
+  const clean = to.replace(/^whatsapp:/i, "");
   return tw.messages.create({
     from: `whatsapp:${process.env.TWILIO_WA_NUMBER}`,
-    to: `whatsapp:${to}`,
+    to: `whatsapp:${clean}`,
     body,
   });
 }
