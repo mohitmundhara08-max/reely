@@ -1,4 +1,3 @@
-// reely-bot/index.js
 import express from "express";
 import twilio from "twilio";
 import { createClient } from "@supabase/supabase-js";
@@ -8,9 +7,8 @@ dotenv.config();
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
-app.use((req, res, next) => { res.header("Access-Control-Allow-Origin", "*"); next(); });
+app.use((req, res, next) => { res.header("Access-Control-Allow-Origin", "*"); res.header("Access-Control-Allow-Headers", "Content-Type"); next(); });
 
-// Supabase (optional for testing - falls back to memory)
 let sb = null;
 if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
   sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
@@ -22,9 +20,8 @@ if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
 const tw = twilio(process.env.TWILIO_SID, process.env.TWILIO_TOKEN);
 const LINK_RE = /https?:\/\/[^\s]+/i;
 
-// In-memory stores
-const sessions = {};   // { phone: { step, reelUrl } }
-const memReels = [];   // fallback when no Supabase
+const sessions = {};
+const memReels = [];
 
 function phone(from) { return from.replace("whatsapp:", ""); }
 
@@ -51,10 +48,7 @@ function parseDeadline(text = "") {
   if (t.includes("week"))     { d.setDate(d.getDate()+7); return d.toISOString().split("T")[0]; }
   if (t.includes("month"))    { d.setMonth(d.getMonth()+1); return d.toISOString().split("T")[0]; }
   const m = text.match(/(\d{1,2})[\s\/\-](\w+)/);
-  if (m) {
-    const p = new Date(`${m[2]} ${m[1]} ${d.getFullYear()}`);
-    if (!isNaN(p)) return p.toISOString().split("T")[0];
-  }
+  if (m) { const p = new Date(`${m[2]} ${m[1]} ${d.getFullYear()}`); if (!isNaN(p)) return p.toISOString().split("T")[0]; }
   return null;
 }
 
@@ -69,7 +63,6 @@ async function saveReel(data) {
     status: "saved",
     created_at: new Date().toISOString(),
   };
-
   if (sb) {
     const { error } = await sb.from("reels").insert(reel);
     if (error) { console.error("DB:", error.message); memReels.push(reel); }
@@ -81,71 +74,47 @@ async function saveReel(data) {
   return reel;
 }
 
-// ── Webhook ───────────────────────────────────────────────────────────────────
+// ── WhatsApp webhook ──────────────────────────────────────────────────────────
 app.post("/bot", async (req, res) => {
   res.sendStatus(200);
   const from    = req.body.From || "";
   const rawBody = (req.body.Body || "").trim();
   const userId  = phone(from);
-
   console.log(`→ [${userId}] ${rawBody}`);
 
   try {
     const session = sessions[userId] || { step: "idle" };
     const link    = rawBody.match(LINK_RE)?.[0];
 
-    // ── IDLE: expecting a link ────────────────────────────────
     if (session.step === "idle" || !session.reelUrl) {
-      if (!link) {
-        await send(from, "Hey 👋 Send me any reel/video link and I'll save it for you.");
-        return;
-      }
+      if (!link) { await send(from, "Hey 👋 Send me any reel/video link and I'll save it for you."); return; }
       sessions[userId] = { step: "ask_action", reelUrl: link };
-      await send(from,
-        "✓ Got it!\n\nQuick — what do you want?\n\n" +
-        "1 — Just save it\n" +
-        "2 — Remind me about it\n" +
-        "3 — Save with a note"
-      );
+      await send(from, "✓ Got it!\n\nQuick — what do you want?\n\n1 — Just save it\n2 — Remind me about it\n3 — Save with a note");
       return;
     }
 
-    // ── AWAITING CHOICE 1/2/3 ─────────────────────────────────
     if (session.step === "ask_action") {
       const n = rawBody.match(/^[123]/)?.[0];
       if (n === "1") {
         const r = await saveReel({ userId, url: session.reelUrl, creator: parseCreator(session.reelUrl) });
         sessions[userId] = { step: "idle" };
-        await send(from, `Saved ✓\nOpen your Reely board to see it.\n\n${r.url.slice(0, 50)}…`);
+        await send(from, `Saved ✓\nOpen your Reely board to see it.\n\n${r.url.slice(0,50)}…`);
         return;
       }
-      if (n === "2") {
-        sessions[userId] = { ...session, step: "ask_when" };
-        await send(from, "When? Reply:\ntoday / tomorrow / this week / this month\nor a date like \"20 may\"");
-        return;
-      }
-      if (n === "3") {
-        sessions[userId] = { ...session, step: "ask_note" };
-        await send(from, "Write your note (why did you save this?):");
-        return;
-      }
+      if (n === "2") { sessions[userId] = { ...session, step: "ask_when" }; await send(from, "When? Reply:\ntoday / tomorrow / this week / this month\nor a date like \"20 may\""); return; }
+      if (n === "3") { sessions[userId] = { ...session, step: "ask_note" }; await send(from, "Write your note (why did you save this?):"); return; }
       await send(from, "Reply 1, 2, or 3 👆");
       return;
     }
 
-    // ── AWAITING WHEN ─────────────────────────────────────────
     if (session.step === "ask_when") {
       const deadline = parseDeadline(rawBody);
       await saveReel({ userId, url: session.reelUrl, creator: parseCreator(session.reelUrl), reminder: deadline });
       sessions[userId] = { step: "idle" };
-      await send(from, deadline
-        ? `Saved ✓ Reminder set for ${deadline}.\nOpen your Reely board.`
-        : `Saved ✓ (couldn't parse that date — no reminder set, you can add one in the app).`
-      );
+      await send(from, deadline ? `Saved ✓ Reminder set for ${deadline}.\nOpen your Reely board.` : `Saved ✓ (couldn't parse date — no reminder set).`);
       return;
     }
 
-    // ── AWAITING NOTE ─────────────────────────────────────────
     if (session.step === "ask_note") {
       await saveReel({ userId, url: session.reelUrl, creator: parseCreator(session.reelUrl), note: rawBody });
       sessions[userId] = { step: "idle" };
@@ -160,7 +129,27 @@ app.post("/bot", async (req, res) => {
   }
 });
 
-// ── API for dashboard to read saved reels ─────────────────────────────────────
+// ── AI proxy (used by dashboard) ──────────────────────────────────────────────
+app.post("/ai", async (req, res) => {
+  const { messages, system } = req.body;
+  try {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, system, messages }),
+    });
+    const data = await r.json();
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Fetch reels for dashboard ─────────────────────────────────────────────────
 app.get("/reels/:userId", async (req, res) => {
   const { userId } = req.params;
   if (sb) {
@@ -176,6 +165,7 @@ app.get("/", (req, res) => res.json({ ok: true, reels_in_memory: memReels.length
 
 app.listen(process.env.PORT || 3000, () => {
   console.log(`\n🚀 Reely bot live on port ${process.env.PORT || 3000}`);
-  console.log(`   POST /bot  — Twilio webhook`);
-  console.log(`   GET  /reels/:userId — fetch user's reels\n`);
+  console.log(`   POST /bot    — Twilio webhook`);
+  console.log(`   POST /ai     — AI proxy`);
+  console.log(`   GET  /reels/:userId — fetch reels\n`);
 });
